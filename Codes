@@ -1,0 +1,183 @@
+from Bio import SeqIO
+import numpy as np
+import tensorflow as tf
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import CountVectorizer
+import pandas as pd
+from scipy import stats
+
+# Function to calculate GC content
+def calculate_gc_content(sequence):
+    """Calculates the GC content (percentage of G and C nucleotides) of a DNA sequence."""
+    gc_count = sequence.count('G') + sequence.count('C')
+    return (gc_count / len(sequence)) * 100
+
+# Function to find open reading frames (ORFs) in a DNA sequence
+def find_orfs(sequence, min_length=100):
+    orfs = []
+    start_codon = "ATG"
+    stop_codons = ["TAA", "TAG", "TGA"]
+    in_orf = False
+    current_orf = ""
+
+    for i in range(0, len(sequence), 3):
+        codon = sequence[i:i+3]
+        if codon == start_codon:
+            if not in_orf:
+                in_orf = True
+                current_orf = start_codon
+            else:
+                current_orf += start_codon
+        elif codon in stop_codons:
+            if in_orf:
+                in_orf = False
+                if len(current_orf) >= min_length:
+                    orfs.append((current_orf, i - len(current_orf) * 3, i))
+                current_orf = ""
+        elif in_orf:
+            current_orf += codon
+
+    return orfs
+
+# Function to encode DNA sequences into numerical format
+def encode_sequence(seq):
+    mapping = {'A': 1, 'C': 2, 'G': 3, 'T': 4,'a':1, 'c':2, 'g':3, 't':4}
+    return [mapping[base] for base in seq]
+
+# Function to extract ORFs and encode them
+def extract_and_encode_orfs(file_path, min_length=100):
+    sequences = []
+    for record in SeqIO.parse(file_path, "fasta"):
+        orfs = find_orfs(str(record.seq), min_length)
+        for orf, start, end in orfs:
+            encoded_orf = encode_sequence(orf)
+            sequences.append(encoded_orf)
+    return sequences
+
+# Function to pad sequences to the same length
+def pad_sequences(sequences, maxlen):
+    return tf.keras.preprocessing.sequence.pad_sequences(sequences, maxlen=maxlen, padding='post')
+
+# Function to train the deep learning model
+def train_model(orfs):
+    # Define the maximum length of ORFs
+    maxlen = max(len(orf) for orf in orfs)
+    
+    # Pad the sequences
+    X = pad_sequences(orfs, maxlen=maxlen)
+    
+    # Create labels (all ones since these are true ORFs)
+    y = np.ones((len(orfs), 1))
+    
+    # Split the data into training and testing sets
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    
+    # Define the model
+    model = tf.keras.Sequential([
+        tf.keras.layers.Embedding(input_dim=5, output_dim=8, input_length=maxlen),
+        tf.keras.layers.Conv1D(filters=64, kernel_size=3, activation='relu'),
+        tf.keras.layers.MaxPooling1D(pool_size=2),
+        tf.keras.layers.Flatten(),
+        tf.keras.layers.Dense(64, activation='relu'),
+        tf.keras.layers.Dense(1, activation='sigmoid')
+    ])
+    
+    # Compile the model
+    model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+    
+    # Train the model
+    model.fit(X_train, y_train, epochs=10, validation_data=(X_test, y_test))
+    
+    return model, maxlen
+
+# Function to predict ORFs in a new genome
+def predict_orfs(model, file_path, maxlen):
+    orfs = extract_and_encode_orfs(file_path)
+    X = pad_sequences(orfs, maxlen=maxlen)
+    predictions = model.predict(X)
+    predicted_orfs = [orfs[i] for i in range(len(predictions)) if predictions[i] > 0.5]
+    return predicted_orfs
+def analyze_genome(file_path):
+    gc_contents = []
+    lengths = []
+    orf_stats = {"total_length": 0, "total_count": 0}
+
+    for record in SeqIO.parse(file_path, "fasta"):
+        gc_content = calculate_gc_content(record.seq)
+        gc_contents.append(gc_content)
+        lengths.append(len(record.seq))
+        orfs1 = find_orfs(str(record.seq))
+        
+        for orf, start, end in orfs1:
+            orf_length = len(orf)
+            orf_stats["total_length"] += orf_length
+            orf_stats["total_count"] += 1
+
+    avg_gc_content = sum(gc_contents) / len(gc_contents)
+    avg_length = sum(lengths) / len(lengths)
+    avg_orf_length = orf_stats["total_length"] / orf_stats["total_count"] if orf_stats["total_count"] > 0 else 0
+    return avg_gc_content, avg_length, avg_orf_length, gc_contents, orf_stats["total_count"]
+
+def compare_genomes(file_path1, file_path2):
+    # Analyze the first genome and capture the list of GC contents and number of ORFs
+    _, _, _, gc_contents1, orf_count1 = analyze_genome(file_path1)
+    # Analyze the second genome and capture the list of GC contents and number of ORFs
+    _, _, _, gc_contents2, orf_count2 = analyze_genome(file_path2)
+
+    # Descriptive statistics
+    print("\nDescriptive Statistics:")
+    print("Genome 1:")
+    print(pd.Series(gc_contents1).describe())
+    print("Number of ORFs:", orf_count1)
+    print("\nGenome 2:")
+    print(pd.Series(gc_contents2).describe())
+    print("Number of ORFs:", orf_count2)
+
+    # Statistical tests
+    print("\nStatistical Tests:")
+    # t-test for GC content between the two genomes
+    print("t-test for GC content between the two genomes:")
+    t_statistic, p_value = stats.ttest_ind(gc_contents1, gc_contents2)
+    print("t-statistic:", t_statistic)
+    print("p-value:", p_value)
+
+def remove_ns_from_fasta(input_fasta):
+      output_fasta= "Filtered_Human_Gut_Microbiome"
+      with open(output_fasta, "w") as output_handle:
+                for record in SeqIO.parse(input_fasta, "fasta"):
+            # Remove 'N's from the sequence
+                    cleaned_seq = str(record.seq).replace("N", "")
+            # Update the sequence in the record
+                    record.seq = cleaned_seq
+            # Write the cleaned record to the output file
+                    SeqIO.write(record, output_handle, "fasta")
+
+      print(f"Cleaned sequences saved to {output_fasta}")
+      return output_fasta
+def main():
+    # Provide the path to the first genome FASTA file here
+    file_path1 = input("Enter the file of genome which you want to search in the human gut microbiome:")
+    file_path2 = input("Enter the file of genome which you want to compare with the first one:")
+    # Extract and encode ORFs from the first genome
+    analyze_genome(file_path1)
+    analyze_genome(file_path2)
+    compare_genomes(file_path1, file_path2)
+    orfs = extract_and_encode_orfs(file_path1)
+
+    # Train the deep learning model
+    model, maxlen = train_model(orfs)
+
+    # Provide the path to the human gut microbiome FASTA file here
+    file_path_human_gut = input("Enter the path to the human gut microbiome FASTA file: ")
+    output_fasta = remove_ns_from_fasta(file_path_human_gut)
+    # Predict ORFs in the human gut microbiome genome
+    predicted_orfs = predict_orfs(model, output_fasta, maxlen)
+
+    print("Predicted ORFs in the human gut microbiome genome:")
+    for orf in predicted_orfs:
+        print("Found")
+        print(orf)
+        
+
+if __name__ == "__main__":
+    main()
